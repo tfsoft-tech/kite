@@ -95,8 +95,9 @@ type CORSConfig struct {
 	MaxAge           time.Duration
 }
 
-// CORS handles simple and preflight requests. Register OPTIONS routes or use
-// it as global middleware together with app.Handle("OPTIONS", "/*path", ...).
+// CORS handles simple and preflight requests. As global middleware (app.Use)
+// it also answers preflights for paths with no OPTIONS route; as group or
+// route middleware, register the OPTIONS routes yourself.
 //
 // It panics if AllowOrigins contains "*" while AllowCredentials is set: that
 // would let any site make credentialed requests. List the trusted origins.

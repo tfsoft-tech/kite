@@ -58,6 +58,7 @@ type App struct {
 	cfg    Config
 	router router
 	mw     []Middleware
+	missH  Handler // a.miss wrapped in global middleware
 	pool   sync.Pool
 	frozen bool
 }
@@ -81,6 +82,7 @@ func New(cfg ...Config) *App {
 	setDur(&c.IdleTimeout, 120*time.Second)
 	setDur(&c.ShutdownTimeout, 10*time.Second)
 	a.pool.New = func() any { return &Ctx{app: a} }
+	a.missH = a.missHandler
 	return a
 }
 
@@ -91,12 +93,15 @@ func setDur(d *time.Duration, def time.Duration) {
 }
 
 // Use adds global middleware. Must be called before routes are registered
-// (middleware is baked into each route at registration time).
+// (middleware is baked into each route at registration time). Global
+// middleware also runs for unmatched requests (404, 405, trailing-slash
+// redirects); group and route middleware do not.
 func (a *App) Use(m ...Middleware) {
 	if a.frozen {
 		panic("kite: Use must be called before registering routes")
 	}
 	a.mw = append(a.mw, m...)
+	a.missH = chain(a.missHandler, a.mw)
 }
 
 func (a *App) handle(method, path string, h Handler, mw []Middleware) {
@@ -125,16 +130,22 @@ func (a *App) DELETE(p string, h Handler, mw ...Middleware) { a.handle("DELETE",
 
 // Static serves files from dir under prefix (e.g. "/assets"). Directories
 // are served only through their index.html; there is no directory listing.
+// Dotfiles and dot-directories (.env, .git/...) are never served.
 func (a *App) Static(prefix, dir string) {
 	fs := http.StripPrefix(prefix, http.FileServer(noListFS{http.Dir(dir)}))
 	a.GET(strings.TrimSuffix(prefix, "/")+"/*filepath", WrapHandler(fs))
 }
 
-// noListFS hides directories that have no index.html, so http.FileServer
-// answers 404 instead of generating a listing.
+// noListFS hides dotfiles and directories that have no index.html, so
+// http.FileServer answers 404 instead of exposing them.
 type noListFS struct{ fs http.FileSystem }
 
 func (n noListFS) Open(name string) (http.File, error) {
+	for _, seg := range strings.Split(name, "/") {
+		if strings.HasPrefix(seg, ".") {
+			return nil, os.ErrNotExist
+		}
+	}
 	f, err := n.fs.Open(name)
 	if err != nil {
 		return nil, err
@@ -211,7 +222,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.route = n.pattern
 		err = n.handler(c)
 	} else {
-		err = a.miss(c, path)
+		err = a.missH(c)
 	}
 	if err != nil {
 		a.cfg.ErrorHandler(c, err)
@@ -220,6 +231,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.release()
 	a.pool.Put(c)
 }
+
+func (a *App) missHandler(c *Ctx) error { return a.miss(c, c.Path()) }
 
 func (a *App) miss(c *Ctx, path string) error {
 	if a.cfg.RedirectTrailingSlash && path != "/" {

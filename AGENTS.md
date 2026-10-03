@@ -34,7 +34,7 @@ make bench   # benchmark suite (slow; run when touching router.go / context.go /
 2. **Routing is 0 allocs.** `TestZeroAlloc` enforces it. Response helpers cost exactly 1 alloc (Content-Type) — see ADR 0001.
 3. **Pooled `Ctx`:** anything added to `Ctx` that holds a reference must be cleared in `release()`. Never let a `Ctx` escape the handler; use `Copy()`.
 4. **No shared mutable globals** reachable from a request (e.g. shared header slices). See ADR 0001.
-5. **Security defaults never get weaker** (ADR 0002): HTML-escaped JSON, `Bind` requires `application/json` and one value, no directory listings, no `//host` redirects, validated request IDs, CORS `*`+credentials panics. Loosening is opt-in through `Config`.
+5. **Security defaults never get weaker** (ADR 0002): HTML-escaped JSON, `Bind` requires `application/json` and one value, no directory listings or dotfiles in `Static`, global middleware on 404/405/redirects, no `//host` redirects, validated request IDs, CORS `*`+credentials panics. Loosening is opt-in through `Config`.
 6. **Misconfiguration panics at startup**, never silently at request time.
 7. Handlers return `error`; internal error text never reaches the client.
 

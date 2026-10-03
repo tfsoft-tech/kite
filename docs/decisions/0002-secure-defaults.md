@@ -10,7 +10,8 @@ a little speed or convenience for safety.
 - `c.JSON` escapes `<`, `>`, `&` (opt-out: `Config.DisableJSONHTMLEscape`).
 - `Bind` requires `Content-Type: application/json` (415) and exactly one JSON value (400).
 - `CORS` panics on `AllowOrigins: ["*"]` with `AllowCredentials`.
-- `Static` never lists directories without `index.html`.
+- `Static` never lists directories without `index.html` and never serves dotfiles (`.env`, `.git/…`).
+- Global middleware (e.g. `Secure`) also runs on 404/405/redirect responses.
 - Trailing-slash redirects never target `//…` or `/\…`.
 - `RequestID` accepts only 1–64 chars of `[A-Za-z0-9_-]`.
 - Pooled `Ctx` is cleared in `release()`; `Copy()` for goroutines.

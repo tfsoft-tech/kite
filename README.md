@@ -48,7 +48,7 @@ A full example lives in `examples/todo` (run it with `go run ./examples/todo`).
 
 Other features: 405 responses with an `Allow` header, HEAD automatically served by the GET handler, and safe server timeout defaults out of the box.
 
-Secure defaults: `c.JSON` escapes `<`, `>` and `&`; `Bind` rejects non-JSON content types (415) and trailing data (400); `Static` never lists directories; `RequestID` only trusts client IDs of 1–64 `[A-Za-z0-9_-]` characters; trailing-slash redirects never point to `//host`.
+Secure defaults: `c.JSON` escapes `<`, `>` and `&`; `Bind` rejects non-JSON content types (415) and trailing data (400); `Static` never lists directories or serves dotfiles (`.env`, `.git`); `RequestID` only trusts client IDs of 1–64 `[A-Za-z0-9_-]` characters; trailing-slash redirects never point to `//host`.
 
 ## Benchmarks
 
@@ -100,7 +100,7 @@ cd bench && GOFLAGS=-mod=mod go test -bench . -count 3
 
 - Do not keep a `*kite.Ctx` after the handler returns or pass it to another goroutine — the object is reused. Copy out the values you need, or call `c.Copy()` inside the handler for a detached copy (its request context is not canceled when the request ends, and it cannot write a response).
 - `CORS` panics if `AllowOrigins` contains `"*"` together with `AllowCredentials: true`; list trusted origins explicitly.
-- `app.Use` must be called before registering routes (calling it afterwards panics so the mistake isn't silent).
+- `app.Use` must be called before registering routes (calling it afterwards panics so the mistake isn't silent). Global middleware also runs for 404/405 and trailing-slash redirects; group and route middleware only run on matched routes.
 - Conflicting routes such as `/a/:id` and `/a/:name` panic at startup, not at request time.
 - Current status is prototype: all unit tests and race tests pass, but it has not yet been proven in production.
 

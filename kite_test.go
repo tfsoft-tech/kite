@@ -472,3 +472,82 @@ func TestCopyOutlivesRequest(t *testing.T) {
 		t.Fatalf("copy: %s", got)
 	}
 }
+
+func TestStaticHidesDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	must(os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+	must(os.WriteFile(filepath.Join(dir, ".env"), []byte("SECRET=1"), 0o644))
+	must(os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("SECRET=2"), 0o644))
+	must(os.WriteFile(filepath.Join(dir, "sub", ".htpasswd"), []byte("SECRET=3"), 0o644))
+	must(os.WriteFile(filepath.Join(dir, "ok.txt"), []byte("ok"), 0o644))
+	a := New()
+	a.Static("/a", dir)
+	for _, p := range []string{"/a/.env", "/a/.git/config", "/a/sub/.htpasswd", "/a/.git/", "/a/%2eenv", "/a/sub/../.env"} {
+		if w := do(a, "GET", p, ""); w.Code != 404 || strings.Contains(w.Body.String(), "SECRET") {
+			t.Errorf("%s: %d %s", p, w.Code, w.Body)
+		}
+	}
+	if w := do(a, "GET", "/a/ok.txt", ""); w.Code != 200 || w.Body.String() != "ok" {
+		t.Errorf("ok.txt: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestGlobalMiddlewareOnUnmatched(t *testing.T) {
+	a := New(Config{RedirectTrailingSlash: true})
+	a.Use(Secure())
+	api := a.Group("/api", func(next Handler) Handler {
+		return func(c *Ctx) error { c.SetHeader("X-Group", "1"); return next(c) }
+	})
+	api.GET("/x", func(c *Ctx) error { return c.String("x") })
+	cases := map[string]struct {
+		method, path string
+		code         int
+	}{
+		"404":      {"GET", "/nope", 404},
+		"405":      {"POST", "/api/x", 405},
+		"redirect": {"GET", "/api/x/", 301},
+		"hit":      {"GET", "/api/x", 200},
+	}
+	for name, tc := range cases {
+		w := do(a, tc.method, tc.path, "")
+		if w.Code != tc.code || w.Header().Get("X-Content-Type-Options") != "nosniff" || w.Header().Get("X-Frame-Options") != "SAMEORIGIN" {
+			t.Errorf("%s: %d %v", name, w.Code, w.Header())
+		}
+		if got := w.Header().Get("X-Group"); (name == "hit") != (got == "1") {
+			t.Errorf("%s: group middleware ran=%q", name, got)
+		}
+	}
+	if w := do(a, "POST", "/api/x", ""); w.Header().Get("Allow") != "GET" {
+		t.Errorf("Allow lost: %v", w.Header())
+	}
+
+	// Use before any route still applies to misses; app without middleware unchanged.
+	b := New()
+	b.Use(Secure())
+	if w := do(b, "GET", "/", ""); w.Code != 404 || w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("no routes: %d %v", w.Code, w.Header())
+	}
+	if w := do(New(), "GET", "/", ""); w.Code != 404 || w.Header().Get("X-Content-Type-Options") != "" {
+		t.Errorf("plain app: %d %v", w.Code, w.Header())
+	}
+}
+
+func TestCORSPreflightWithoutOptionsRoute(t *testing.T) {
+	a := New()
+	a.Use(CORS(CORSConfig{AllowOrigins: []string{"https://ok.com"}}))
+	a.POST("/p", func(c *Ctx) error { return nil })
+	r := httptest.NewRequest("OPTIONS", "/p", nil)
+	r.Header.Set("Origin", "https://ok.com")
+	r.Header.Set("Access-Control-Request-Method", "POST")
+	w := httptest.NewRecorder()
+	a.ServeHTTP(w, r)
+	if w.Code != 204 || w.Header().Get("Access-Control-Allow-Origin") != "https://ok.com" {
+		t.Fatalf("preflight: %d %v", w.Code, w.Header())
+	}
+}
