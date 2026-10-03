@@ -108,48 +108,67 @@ func lcp(a, b string) int {
 }
 
 // find walks the tree. path is what remains after n.prefix was consumed.
+//
+// The common case (no param/wildcard competing with a matching static
+// child at the same node) needs no backtracking, so it runs as a plain
+// loop. Recursion is only used where a static match could still fail
+// deeper and a param/wildcard sibling needs a chance to try instead —
+// that's the rare case, and it stays correct because it falls back to
+// the same logic.
 func (n *node) find(path string, ps *[]Param) *node {
-	if path == "" {
-		if n.handler != nil {
-			return n
+	for {
+		if path == "" {
+			if n.handler != nil {
+				return n
+			}
+			if n.wildChild != nil {
+				*ps = append(*ps, Param{n.wildName, ""})
+				return n.wildChild
+			}
+			return nil
 		}
+		// 1. static
+		c := path[0]
+		var child *node
+		for i, idx := range n.indices {
+			if idx == c {
+				child = n.children[i]
+				break
+			}
+		}
+		// The first byte is already known equal (it matched n.indices),
+		// so only the rest of the prefix needs comparing.
+		if child != nil && len(path) >= len(child.prefix) && path[1:len(child.prefix)] == child.prefix[1:] {
+			rest := path[len(child.prefix):]
+			if n.paramChild == nil && n.wildChild == nil {
+				// No sibling could ever match here; descend without
+				// paying for a function call.
+				n, path = child, rest
+				continue
+			}
+			if r := child.find(rest, ps); r != nil {
+				return r
+			}
+		}
+		// 2. param
+		if n.paramChild != nil && c != '/' {
+			end := strings.IndexByte(path, '/')
+			if end < 0 {
+				end = len(path)
+			}
+			*ps = append(*ps, Param{n.paramName, path[:end]})
+			if r := n.paramChild.find(path[end:], ps); r != nil {
+				return r
+			}
+			*ps = (*ps)[:len(*ps)-1]
+		}
+		// 3. wildcard
 		if n.wildChild != nil {
-			*ps = append(*ps, Param{n.wildName, ""})
+			*ps = append(*ps, Param{n.wildName, path})
 			return n.wildChild
 		}
 		return nil
 	}
-	// 1. static
-	c := path[0]
-	for i, idx := range n.indices {
-		if idx == c {
-			child := n.children[i]
-			if len(path) >= len(child.prefix) && path[:len(child.prefix)] == child.prefix {
-				if r := child.find(path[len(child.prefix):], ps); r != nil {
-					return r
-				}
-			}
-			break
-		}
-	}
-	// 2. param
-	if n.paramChild != nil && c != '/' {
-		end := strings.IndexByte(path, '/')
-		if end < 0 {
-			end = len(path)
-		}
-		*ps = append(*ps, Param{n.paramName, path[:end]})
-		if r := n.paramChild.find(path[end:], ps); r != nil {
-			return r
-		}
-		*ps = (*ps)[:len(*ps)-1]
-	}
-	// 3. wildcard
-	if n.wildChild != nil {
-		*ps = append(*ps, Param{n.wildName, path})
-		return n.wildChild
-	}
-	return nil
 }
 
 // method indexes for the common verbs; avoids a map lookup per request.
