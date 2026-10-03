@@ -42,15 +42,19 @@ A full example lives in `examples/todo` (run it with `go run ./examples/todo`).
 | Area | Functions |
 |---|---|
 | Routing | `GET/POST/PUT/PATCH/DELETE/Handle`, `Group`, `Static`, `WrapHandler` |
-| Request | `Param`, `ParamInt`, `Query`, `Header`, `Bind` (JSON + body size limit), `Set/Get`, `Route` |
+| Request | `Param`, `ParamInt`, `Query`, `Header`, `Bind` (requires `Content-Type: application/json`, one JSON value, body size limit), `Set/Get`, `Route`, `Copy` |
 | Response | `JSON`, `String`, `HTML`, `Bytes`, `Stream`, `Status`, `NoContent`, `Redirect` |
 | Errors | `kite.NewError(code, msg)`, `ErrNotFound`, `ErrUnauthorized`, ... |
-| Middleware | `Recover`, `Logger` (slog), `RequestID`, `CORS`, `Timeout` |
-| Config | `BodyLimit`, `ErrorHandler`, `NotFound`, `JSONMarshal` (plug in sonic/go-json), `RedirectTrailingSlash`, timeouts |
+| Middleware | `Recover`, `Logger` (slog), `RequestID`, `CORS`, `Secure` (nosniff, X-Frame-Options, Referrer-Policy, optional CSP/HSTS), `Timeout` |
+| Config | `BodyLimit`, `ErrorHandler`, `NotFound`, `JSONMarshal` (plug in sonic/go-json), `DisableJSONHTMLEscape`, `RedirectTrailingSlash`, timeouts |
 
 Other features: 405 responses with an `Allow` header, HEAD automatically served by the GET handler, and safe server timeout defaults out of the box.
 
+Secure defaults: `c.JSON` escapes `<`, `>` and `&`; `Bind` rejects non-JSON content types (415) and trailing data (400); `Static` never lists directories; `RequestID` only trusts client IDs of 1–64 `[A-Za-z0-9_-]` characters; trailing-slash redirects never point to `//host`.
+
 ## Benchmarks
+
+> These numbers predate the security hardening. Setting `Content-Type` per response now costs one extra allocation (and ~20 ns) on responses written with `String`/`JSON`/`HTML`/`Bytes`; routing itself is still 0 allocs.
 
 Measured on a 2 vCPU machine with Go 1.24.7, against Gin v1.10.1, Echo v4.13.3, httprouter v1.3.0, Chi v5.3.2, and Go's own `http.ServeMux`.
 All routers use the same 189-route GitHub API set and were verified to match every route (median of 3 runs).
@@ -96,7 +100,8 @@ cd bench && GOFLAGS=-mod=mod go test -bench . -count 3
 
 ## Caveats
 
-- Do not keep a `*kite.Ctx` after the handler returns or pass it to another goroutine — the object is reused. Copy out any values you need first.
+- Do not keep a `*kite.Ctx` after the handler returns or pass it to another goroutine — the object is reused. Copy out the values you need, or call `c.Copy()` inside the handler for a detached copy (its request context is not canceled when the request ends, and it cannot write a response).
+- `CORS` panics if `AllowOrigins` contains `"*"` together with `AllowCredentials: true`; list trusted origins explicitly.
 - `app.Use` must be called before registering routes (calling it afterwards panics so the mistake isn't silent).
 - Conflicting routes such as `/a/:id` and `/a/:name` panic at startup, not at request time.
 - Current status is prototype: all unit tests and race tests pass, but it has not yet been proven in production.

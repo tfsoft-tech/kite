@@ -41,6 +41,10 @@ type Config struct {
 	NotFound Handler
 	// JSONMarshal plugs in a faster encoder (e.g. sonic, go-json).
 	JSONMarshal func(v any) ([]byte, error)
+	// DisableJSONHTMLEscape stops Ctx.JSON from escaping <, > and & as
+	// \u003c etc. Only set it when output is never embedded in HTML.
+	// It does not apply to a custom JSONMarshal.
+	DisableJSONHTMLEscape bool
 	// RedirectTrailingSlash redirects /foo/ <-> /foo when only the other exists.
 	RedirectTrailingSlash bool
 	// Server timeouts (defaults: read header 5s, read 30s, write 30s, idle 120s).
@@ -119,10 +123,36 @@ func (a *App) PUT(p string, h Handler, mw ...Middleware)    { a.handle("PUT", p,
 func (a *App) PATCH(p string, h Handler, mw ...Middleware)  { a.handle("PATCH", p, h, mw) }
 func (a *App) DELETE(p string, h Handler, mw ...Middleware) { a.handle("DELETE", p, h, mw) }
 
-// Static serves files from dir under prefix (e.g. "/assets").
+// Static serves files from dir under prefix (e.g. "/assets"). Directories
+// are served only through their index.html; there is no directory listing.
 func (a *App) Static(prefix, dir string) {
-	fs := http.StripPrefix(prefix, http.FileServer(http.Dir(dir)))
+	fs := http.StripPrefix(prefix, http.FileServer(noListFS{http.Dir(dir)}))
 	a.GET(strings.TrimSuffix(prefix, "/")+"/*filepath", WrapHandler(fs))
+}
+
+// noListFS hides directories that have no index.html, so http.FileServer
+// answers 404 instead of generating a listing.
+type noListFS struct{ fs http.FileSystem }
+
+func (n noListFS) Open(name string) (http.File, error) {
+	f, err := n.fs.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.IsDir() {
+		idx, err := n.fs.Open(strings.TrimSuffix(name, "/") + "/index.html")
+		if err != nil {
+			f.Close()
+			return nil, os.ErrNotExist
+		}
+		idx.Close()
+	}
+	return f, nil
 }
 
 // WrapHandler adapts any http.Handler (e.g. pprof, promhttp) to kite.
@@ -187,11 +217,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.cfg.ErrorHandler(c, err)
 	}
 
-	c.Request = nil
-	c.rw.ResponseWriter = nil
-	if cap(c.params) > len(c.pbuf) { // grew past inline array; drop it
-		c.params = nil
-	}
+	c.release()
 	a.pool.Put(c)
 }
 
@@ -201,7 +227,12 @@ func (a *App) miss(c *Ctx, path string) error {
 		if strings.HasSuffix(path, "/") {
 			alt = path[:len(path)-1]
 		}
-		if t := a.router.tree(c.Request.Method, false); t != nil {
+		// "//host" or "/\host" in Location is read by browsers as another
+		// origin (open redirect), so never redirect to such a path.
+		if strings.HasPrefix(alt, "//") || strings.HasPrefix(alt, "/\\") {
+			alt = ""
+		}
+		if t := a.router.tree(c.Request.Method, false); t != nil && alt != "" {
 			c.params = c.pbuf[:0]
 			if t.find(alt, &c.params) != nil {
 				code := http.StatusMovedPermanently

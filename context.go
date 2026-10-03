@@ -3,9 +3,11 @@ package kite
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,13 +15,12 @@ import (
 	"sync"
 )
 
-// Shared, immutable header values. Assigning these directly to the header
-// map avoids allocating a new []string on every response.
-var (
-	hdrJSON  = []string{"application/json; charset=utf-8"}
-	hdrText  = []string{"text/plain; charset=utf-8"}
-	hdrHTML  = []string{"text/html; charset=utf-8"}
-	hdrBytes = []string{"application/octet-stream"}
+// Content types written by the response helpers.
+const (
+	MIMEJSON  = "application/json; charset=utf-8"
+	MIMEText  = "text/plain; charset=utf-8"
+	MIMEHTML  = "text/html; charset=utf-8"
+	MIMEBytes = "application/octet-stream"
 )
 
 // responseWriter tracks status and size. It lives inside the pooled Ctx, so
@@ -111,6 +112,53 @@ func (c *Ctx) reset(w http.ResponseWriter, r *http.Request) {
 	c.route = ""
 }
 
+// release drops every reference held from the finished request so a pooled
+// Ctx neither keeps that request's memory alive nor exposes its values.
+func (c *Ctx) release() {
+	c.Request = nil
+	c.rw.ResponseWriter = nil
+	c.query = nil
+	clear(c.pbuf[:])
+	if cap(c.params) > len(c.pbuf) { // grew past inline array; drop it
+		c.params = nil
+	} else {
+		c.params = c.pbuf[:0]
+	}
+	clear(c.store)
+	c.store = c.store[:0]
+}
+
+// detachedWriter backs a copied Ctx: the original response is gone, so
+// writes fail instead of touching a recycled http.ResponseWriter.
+type detachedWriter struct{ h http.Header }
+
+var errDetached = errors.New("kite: response is not available on a copied Ctx")
+
+func (w *detachedWriter) Header() http.Header       { return w.h }
+func (w *detachedWriter) Write([]byte) (int, error) { return 0, errDetached }
+func (w *detachedWriter) WriteHeader(int)           {}
+
+// Copy returns a non-pooled snapshot of c that is safe to use from another
+// goroutine after the handler returns. Call it inside the handler. Params,
+// store and the request are cloned; the request context keeps its values but
+// is not canceled when the original request ends. Writing a response from
+// the copy returns an error.
+func (c *Ctx) Copy() *Ctx {
+	cp := &Ctx{
+		app:    c.app,
+		route:  c.route,
+		params: append([]Param(nil), c.params...),
+		store:  append([]kv(nil), c.store...),
+	}
+	if c.Request != nil {
+		cp.Request = c.Request.Clone(context.WithoutCancel(c.Request.Context()))
+	}
+	cp.rw.reset(&detachedWriter{h: http.Header{}})
+	cp.rw.status = c.rw.status
+	cp.Response = &cp.rw
+	return cp
+}
+
 // ---- request ---------------------------------------------------------------
 
 // Param returns a path parameter (":id" or "*path").
@@ -153,19 +201,37 @@ func (c *Ctx) Path() string   { return c.Request.URL.Path }
 // Route returns the matched route pattern, e.g. "/users/:id".
 func (c *Ctx) Route() string { return c.route }
 
-// Bind decodes a JSON body into v, capped by Config.BodyLimit.
+// Bind decodes a JSON body into v, capped by Config.BodyLimit. The request
+// must be sent as application/json (415 otherwise), which keeps cross-origin
+// "simple" form/text requests from reaching JSON handlers, and the body must
+// hold exactly one JSON value.
 func (c *Ctx) Bind(v any) error {
+	if mt, _, err := mime.ParseMediaType(c.Header("Content-Type")); err != nil || mt != "application/json" {
+		return NewError(http.StatusUnsupportedMediaType, "content-type must be application/json")
+	}
 	body := http.MaxBytesReader(c.Response, c.Request.Body, c.app.cfg.BodyLimit)
 	dec := json.NewDecoder(body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			return NewError(http.StatusRequestEntityTooLarge, "request body too large")
+		return bindError(err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err != nil {
+			if he := bindError(err); he.Code == http.StatusRequestEntityTooLarge {
+				return he
+			}
 		}
-		return NewError(http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return NewError(http.StatusBadRequest, "invalid JSON: unexpected data after top-level value")
 	}
 	return nil
+}
+
+func bindError(err error) *HTTPError {
+	var mbe *http.MaxBytesError
+	if errors.As(err, &mbe) {
+		return NewError(http.StatusRequestEntityTooLarge, "request body too large")
+	}
+	return NewError(http.StatusBadRequest, "invalid JSON: "+err.Error())
 }
 
 // Set / Get store request-scoped values without allocating a map.
@@ -198,14 +264,14 @@ func (c *Ctx) SetHeader(k, v string) { c.rw.Header().Set(k, v) }
 
 // String writes a text/plain body.
 func (c *Ctx) String(s string) error {
-	c.rw.Header()["Content-Type"] = hdrText
+	c.rw.Header().Set("Content-Type", MIMEText)
 	_, err := c.rw.WriteString(s)
 	return err
 }
 
 // HTML writes a text/html body.
 func (c *Ctx) HTML(s string) error {
-	c.rw.Header()["Content-Type"] = hdrHTML
+	c.rw.Header().Set("Content-Type", MIMEHTML)
 	_, err := c.rw.WriteString(s)
 	return err
 }
@@ -213,10 +279,9 @@ func (c *Ctx) HTML(s string) error {
 // Bytes writes a raw body with the given content type ("" = octet-stream).
 func (c *Ctx) Bytes(contentType string, b []byte) error {
 	if contentType == "" {
-		c.rw.Header()["Content-Type"] = hdrBytes
-	} else {
-		c.rw.Header().Set("Content-Type", contentType)
+		contentType = MIMEBytes
 	}
+	c.rw.Header().Set("Content-Type", contentType)
 	_, err := c.rw.Write(b)
 	return err
 }
@@ -241,14 +306,14 @@ type jsonBuf struct {
 var jsonPool = sync.Pool{New: func() any {
 	j := &jsonBuf{}
 	j.enc = json.NewEncoder(&j.buf)
-	j.enc.SetEscapeHTML(false)
 	return j
 }}
 
 // JSON encodes v. Uses the pluggable Config.JSONMarshal if set, otherwise
-// encoding/json with a pooled buffer + encoder.
+// encoding/json with a pooled buffer + encoder. <, > and & are escaped unless
+// Config.DisableJSONHTMLEscape is set.
 func (c *Ctx) JSON(v any) error {
-	c.rw.Header()["Content-Type"] = hdrJSON
+	c.rw.Header().Set("Content-Type", MIMEJSON)
 	if m := c.app.cfg.JSONMarshal; m != nil {
 		b, err := m(v)
 		if err != nil {
@@ -259,6 +324,7 @@ func (c *Ctx) JSON(v any) error {
 	}
 	j := jsonPool.Get().(*jsonBuf)
 	j.buf.Reset()
+	j.enc.SetEscapeHTML(!c.app.cfg.DisableJSONHTMLEscape)
 	err := j.enc.Encode(v)
 	if err == nil {
 		_, err = c.rw.Write(j.buf.Bytes())

@@ -55,11 +55,13 @@ func Logger() Middleware {
 }
 
 // RequestID sets/propagates X-Request-ID and stores it under "request_id".
+// A client-supplied ID is kept only if it is 1-64 characters of [A-Za-z0-9_-];
+// anything else is replaced with a fresh random ID.
 func RequestID() Middleware {
 	return func(next Handler) Handler {
 		return func(c *Ctx) error {
 			id := c.Header("X-Request-ID")
-			if id == "" {
+			if !validRequestID(id) {
 				var b [8]byte
 				_, _ = rand.Read(b[:])
 				id = hex.EncodeToString(b[:])
@@ -71,9 +73,22 @@ func RequestID() Middleware {
 	}
 }
 
+func validRequestID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		ch := id[i]
+		if !('a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' || '0' <= ch && ch <= '9' || ch == '-' || ch == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // CORSConfig configures CORS.
 type CORSConfig struct {
-	AllowOrigins     []string // "*" allowed
+	AllowOrigins     []string // "*" allowed, but not together with AllowCredentials
 	AllowMethods     []string
 	AllowHeaders     []string
 	AllowCredentials bool
@@ -82,6 +97,9 @@ type CORSConfig struct {
 
 // CORS handles simple and preflight requests. Register OPTIONS routes or use
 // it as global middleware together with app.Handle("OPTIONS", "/*path", ...).
+//
+// It panics if AllowOrigins contains "*" while AllowCredentials is set: that
+// would let any site make credentialed requests. List the trusted origins.
 func CORS(cfg CORSConfig) Middleware {
 	if len(cfg.AllowMethods) == 0 {
 		cfg.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
@@ -97,6 +115,9 @@ func CORS(cfg CORSConfig) Middleware {
 		}
 		allowed[o] = true
 	}
+	if any && cfg.AllowCredentials {
+		panic(`kite: CORS AllowOrigins "*" cannot be combined with AllowCredentials; list explicit origins`)
+	}
 	return func(next Handler) Handler {
 		return func(c *Ctx) error {
 			origin := c.Header("Origin")
@@ -104,7 +125,7 @@ func CORS(cfg CORSConfig) Middleware {
 				return next(c)
 			}
 			h := c.Response.Header()
-			if any && !cfg.AllowCredentials {
+			if any {
 				h.Set("Access-Control-Allow-Origin", "*")
 			} else {
 				h.Set("Access-Control-Allow-Origin", origin)
@@ -126,6 +147,61 @@ func CORS(cfg CORSConfig) Middleware {
 				return c.NoContent(http.StatusNoContent)
 			}
 			return next(c)
+		}
+	}
+}
+
+// SecureConfig configures Secure. Empty fields get the defaults noted.
+type SecureConfig struct {
+	ContentTypeNosniff string // X-Content-Type-Options, default "nosniff"
+	XFrameOptions      string // default "SAMEORIGIN" (or "DENY")
+	ReferrerPolicy     string // default "strict-origin-when-cross-origin"
+	// ContentSecurityPolicy is sent only when set.
+	ContentSecurityPolicy string
+	// HSTSMaxAge > 0 enables Strict-Transport-Security. Only enable it for
+	// sites served exclusively over HTTPS.
+	HSTSMaxAge            time.Duration
+	HSTSIncludeSubdomains bool
+	HSTSPreload           bool
+}
+
+// Secure sets baseline security response headers.
+func Secure(cfg ...SecureConfig) Middleware {
+	var c SecureConfig
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
+	def := func(s *string, v string) {
+		if *s == "" {
+			*s = v
+		}
+	}
+	def(&c.ContentTypeNosniff, "nosniff")
+	def(&c.XFrameOptions, "SAMEORIGIN")
+	def(&c.ReferrerPolicy, "strict-origin-when-cross-origin")
+	hsts := ""
+	if c.HSTSMaxAge > 0 {
+		hsts = "max-age=" + strconv.FormatInt(int64(c.HSTSMaxAge.Seconds()), 10)
+		if c.HSTSIncludeSubdomains {
+			hsts += "; includeSubDomains"
+		}
+		if c.HSTSPreload {
+			hsts += "; preload"
+		}
+	}
+	return func(next Handler) Handler {
+		return func(ctx *Ctx) error {
+			h := ctx.Response.Header()
+			h.Set("X-Content-Type-Options", c.ContentTypeNosniff)
+			h.Set("X-Frame-Options", c.XFrameOptions)
+			h.Set("Referrer-Policy", c.ReferrerPolicy)
+			if c.ContentSecurityPolicy != "" {
+				h.Set("Content-Security-Policy", c.ContentSecurityPolicy)
+			}
+			if hsts != "" {
+				h.Set("Strict-Transport-Security", hsts)
+			}
+			return next(ctx)
 		}
 	}
 }
