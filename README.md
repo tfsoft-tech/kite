@@ -17,8 +17,6 @@ A small, fast, resource-light web framework for Go, built purely on `net/http` w
 go get github.com/tfsoft-tech/kite@latest
 ```
 
-If the repository is private, configure this once first: `go env -w GOPRIVATE=github.com/tfsoft-tech/*`
-
 ## Getting Started
 
 ```go
