@@ -1,7 +1,7 @@
 // A tiny in-memory TODO API showing the main Kite features.
 //
 //	go run ./examples/todo
-//	curl -X POST localhost:8080/api/v1/todos -d '{"title":"ลองใช้ Kite"}'
+//	curl -X POST localhost:8080/api/v1/todos -H 'Content-Type: application/json' -d '{"title":"ลองใช้ Kite"}'
 //	curl localhost:8080/api/v1/todos/1
 package main
 

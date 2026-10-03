@@ -105,3 +105,7 @@ cd bench && GOFLAGS=-mod=mod go test -bench . -count 3
 - `app.Use` must be called before registering routes (calling it afterwards panics so the mistake isn't silent).
 - Conflicting routes such as `/a/:id` and `/a/:name` panic at startup, not at request time.
 - Current status is prototype: all unit tests and race tests pass, but it has not yet been proven in production.
+
+## License
+
+[MIT](LICENSE) © 2026 TF Soft Co., Ltd.

@@ -16,7 +16,5 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - name: Vet
-        run: go vet ./...
-      - name: Test (race)
-        run: go test -race -count=1 ./...
+      - name: Check (gofmt, vet, race tests, agent files)
+        run: make check
